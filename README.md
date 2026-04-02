@@ -40,9 +40,15 @@ My_cuda/
 
 | 版本 | 文件 | 策略 | 备注 |
 |------|------|------|------|
-| v0 | `reduce_v0_global_mem.cu` | 全局内存，朴素实现 | baseline ✅ 已验证运行 |
+| v0 | `reduce_v0_global_mem.cu` | 全局内存，交错寻址树形归约 | baseline ✅ 已实现并验证 |
 | v1 | (待续) | 共享内存 | 减少全局内存访问 |
 | v2 | (待续) | 展开循环 + warp 原语 | 消除 warp 内同步开销 |
+
+**v0 实现要点：**
+- 每个 block 处理 `THREAD_PER_BLOCK`(256) 个元素，结果写入 `d_out[blockIdx.x]`
+- 树形归约：步长 `i` 每轮翻倍（1→2→4→…），`log2(blockDim.x)` 轮后 `input[0]` 即为 block 总和
+- 已知瓶颈：`threadIdx.x % (2*i) == 0` 的取模判断导致同一 warp 内线程走不同分支（warp divergence），v1 将针对此优化
+- 数据规模：N = 32M floats，CPU 结果对照校验误差 < 0.005
 
 **编译与运行：**
 
