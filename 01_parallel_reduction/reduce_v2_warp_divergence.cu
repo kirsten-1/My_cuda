@@ -6,7 +6,7 @@
 
 #define THREAD_PER_BLOCK 256
 
-// --- GPU 核函数：并行归约（global memory 版，交错寻址）---
+// --- GPU 核函数：并行归约（shared memory 版，连续寻址，存在 warp divergence）---
 // 每个 block 负责对自己分到的 blockDim.x 个元素求和，结果写入 d_out[blockIdx.x]
 __global__ void reduce(float *d_in, float *d_out) {
     // 让每个 block 的指针直接指向属于自己的那段输入数据
@@ -14,19 +14,20 @@ __global__ void reduce(float *d_in, float *d_out) {
     __shared__ float sdata[THREAD_PER_BLOCK]; // 每个 block 内的共享内存，用于存储当前 block 的数据
     float *input_dim = d_in + blockIdx.x * blockDim.x;
     sdata[threadIdx.x] = input_dim[threadIdx.x]; // 将全局内存的数据加载到共享内存中
-    __syncthreads();
+    __syncthreads(); // 确保所有线程都加载完成后再进行归约
     // 树形归约：每轮步长 i 翻倍（1, 2, 4, 8, ...）
-    // 第 k 轮结束后，间距为 2^k 的位置上保存了 2^k 个元素的局部和
+    // 第 k 轮结束后，只有前 blockDim.x / 2^k 个线程的数据被更新
     // 例如 blockDim.x=8，过程如下：
-    //   i=1: [0]+=[1], [2]+=[3], [4]+=[5], [6]+=[7]
-    //   i=2: [0]+=[2], [4]+=[6]
-    //   i=4: [0]+=[4]  → input_dim[0] 即为全部 8 个元素之和
+    //   i=1: [0]+=[1], [2]+=[3], [4]+=[5], [6]+=[7]  (前 4 个线程参与)
+    //   i=2: [0]+=[2], [4]+=[6]                       (前 2 个线程参与)
+    //   i=4: [0]+=[4]                                 (前 1 个线程参与)
     for (int i = 1; i < blockDim.x; i *= 2) {
-        // 只有 threadIdx.x 是 2*i 倍数的线程参与本轮计算
-        // 注意：这种取模判断会导致同一个 warp 内线程走不同分支（warp divergence），
-        // 是 v0 版本性能较低的主要原因之一
-        if (threadIdx.x % (2 * i) == 0) {
-            sdata[threadIdx.x] += sdata[threadIdx.x + i];
+        // 只有前 blockDim.x / (2*i) 个线程参与本轮计算
+        // 这种条件判断会导致同一个 warp 内线程走不同分支（warp divergence），
+        // 是该版本性能较低的主要原因
+        if (threadIdx.x < blockDim.x / (2 * i)) {
+            int index = threadIdx.x * (2 * i);
+            sdata[index] += sdata[index + i];
         }
         // 块内同步：确保本轮所有写入完成后，下一轮才能读取
         __syncthreads();

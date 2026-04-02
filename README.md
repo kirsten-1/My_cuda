@@ -27,8 +27,11 @@ My_cuda/
 ├── CMakeLists.txt
 └── 01_parallel_reduction/          # 并行规约优化
     ├── CMakeLists.txt
+    ├── Makefile
+    ├── benchmark.cu                # 多版本性能对比
     ├── reduce_v0_global_mem.cu     # v0: 全局内存朴素实现 (baseline)
-    └── reduce_v1_shm.cu            # v1: 共享内存优化
+    ├── reduce_v1_shm.cu            # v1: 共享内存优化
+    └── reduce_v2_warp_divergence.cu # v2: 连续寻址，仍存在 warp divergence
 ```
 
 ## 学习笔记
@@ -41,9 +44,10 @@ My_cuda/
 
 | 版本 | 文件 | 策略 | 备注 |
 |------|------|------|------|
-| v0 | `reduce_v0_global_mem.cu` | 全局内存，交错寻址树形归约 | baseline ✅ 已实现并验证 |
-| v1 | `reduce_v1_shm.cu` | 共享内存，交错寻址树形归约 | 避免修改原数据，减少 global memory 访问 ✅ 已实现并验证 |
-| v2 | (待续) | 展开循环 + warp 原语 | 消除 warp 内同步开销 |
+| v0 | `reduce_v0_global_mem.cu` | 全局内存，交错寻址树形归约 | baseline ✅ |
+| v1 | `reduce_v1_shm.cu` | 共享内存，交错寻址树形归约 | 避免修改原数据，减少 global memory 访问 ✅ |
+| v2 | `reduce_v2_warp_divergence.cu` | 共享内存，连续寻址（仍有 warp divergence） | 改变索引方式，但分支问题未消除 ✅ |
+| v3 | (待续) | 消除 warp divergence | 让同一 warp 内线程走相同分支 |
 
 **v0 实现要点：**
 - 每个 block 处理 `THREAD_PER_BLOCK`(256) 个元素，结果写入 `d_out[blockIdx.x]`
@@ -55,6 +59,20 @@ My_cuda/
 - **高延迟**：归约循环的每一轮读写都直接访问 Global Memory，其延迟比寄存器或 Shared Memory 慢 100 倍以上，是性能瓶颈所在
 - **破坏原数据**：`input_dim` 直接指向 `d_in`，归约过程中的加法会原地修改显存中的输入数据，归约完成后原始数据已被覆盖
 - **改进方向（v1）**：先将数据从 Global Memory 加载到每个 Block 私有的 Shared Memory，所有加法在片上完成后再写回，可大幅降低访存延迟
+
+**v2 实现要点：**
+- 改用连续寻址：`index = threadIdx.x * (2*i)`，每轮只有前 `blockDim.x/(2*i)` 个线程参与
+- 相比 v1 的取模判断，活跃线程更集中，但仍跨 warp 边界产生 divergence，性能与 v1 接近
+
+**Benchmark 结果（RTX 4090 D，N=32M floats，block=256，理论带宽 1008 GB/s）：**
+
+| 版本 | 耗时 (ms) | 带宽 (GB/s) | 效率 |
+|------|-----------|-------------|------|
+| v0 | 0.381 | 353.66 | 35.09% |
+| v1 | 0.321 | 420.10 | 41.68% |
+| v2 | 0.323 | 417.17 | 41.39% |
+
+v1→v2 性能几乎持平，说明连续寻址本身并未消除 warp divergence 的根本开销，v3 将从算法层面彻底解决。
 
 **编译与运行：**
 

@@ -7,3 +7,5 @@ build/
 # nvcc 直接编译的可执行文件（无扩展名）
 01_parallel_reduction/reduce_v0
 01_parallel_reduction/reduce_v1
+01_parallel_reduction/reduce_v2
+01_parallel_reduction/benchmark
