@@ -1,0 +1,8 @@
+# 编译产物
+build/
+*.o
+*.a
+*.so
+
+# nvcc 直接编译的可执行文件（无扩展名）
+01_parallel_reduction/reduce_v0
