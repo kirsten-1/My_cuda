@@ -40,9 +40,18 @@ My_cuda/
 
 | 版本 | 文件 | 策略 | 备注 |
 |------|------|------|------|
-| v0 | `reduce_v0_global_mem.cu` | 全局内存，朴素实现 | baseline |
+| v0 | `reduce_v0_global_mem.cu` | 全局内存，朴素实现 | baseline ✅ 已验证运行 |
 | v1 | (待续) | 共享内存 | 减少全局内存访问 |
 | v2 | (待续) | 展开循环 + warp 原语 | 消除 warp 内同步开销 |
+
+**编译与运行：**
+
+```bash
+# 直接用 nvcc 编译
+/usr/local/cuda/bin/nvcc -arch=sm_89 reduce_v0_global_mem.cu -o reduce_v0
+./reduce_v0
+# 输出: hello reduce
+```
 
 **参考：**
 - [Optimizing Parallel Reduction in CUDA - Mark Harris (NVIDIA)](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf)
