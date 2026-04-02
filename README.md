@@ -6,10 +6,11 @@
 
 | 项目 | 版本 |
 |------|------|
-| GPU | (待填写，如 RTX 3090) |
-| CUDA Toolkit | (待填写，如 12.x) |
-| CMake | >= 3.20.0 |
-| OS | (待填写) |
+| GPU | NVIDIA GeForce RTX 4090 D (24 GB) |
+| Driver | 580.105.08 |
+| CUDA Toolkit | 12.8 (V12.8.93) |
+| CMake | 3.22.1 |
+| OS | Ubuntu 22.04.5 LTS (Jammy Jellyfish) |
 
 ## 学习路线
 
