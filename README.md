@@ -27,7 +27,8 @@ My_cuda/
 ├── CMakeLists.txt
 └── 01_parallel_reduction/          # 并行规约优化
     ├── CMakeLists.txt
-    └── reduce_v0_global_mem.cu     # v0: 全局内存朴素实现 (baseline)
+    ├── reduce_v0_global_mem.cu     # v0: 全局内存朴素实现 (baseline)
+    └── reduce_v1_shm.cu            # v1: 共享内存优化
 ```
 
 ## 学习笔记
@@ -41,7 +42,7 @@ My_cuda/
 | 版本 | 文件 | 策略 | 备注 |
 |------|------|------|------|
 | v0 | `reduce_v0_global_mem.cu` | 全局内存，交错寻址树形归约 | baseline ✅ 已实现并验证 |
-| v1 | (待续) | 共享内存 | 减少全局内存访问 |
+| v1 | `reduce_v1_shm.cu` | 共享内存，交错寻址树形归约 | 避免修改原数据，减少 global memory 访问 ✅ 已实现并验证 |
 | v2 | (待续) | 展开循环 + warp 原语 | 消除 warp 内同步开销 |
 
 **v0 实现要点：**
