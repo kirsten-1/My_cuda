@@ -18,7 +18,7 @@
 extern void launch_v0(float *d_in, float *d_out, int n, int block_num);
 extern void launch_v1(float *d_in, float *d_out, int n, int block_num);
 extern void launch_v2(float *d_in, float *d_out, int n, int block_num);
-// extern void launch_v3(...);  // 新版本在这里添加
+extern void launch_v3(float *d_in, float *d_out, int n, int block_num);
 
 // ============================================================
 // 版本注册表：添加新版本只需在这里加一行
@@ -32,7 +32,7 @@ static ReduceVersion versions[] = {
     { "v0", launch_v0 },
     { "v1", launch_v1 },
     { "v2", launch_v2 },
-    // { "v3", launch_v3 },
+    { "v3", launch_v3 },
 };
 static const int NUM_VERSIONS = sizeof(versions) / sizeof(versions[0]);
 

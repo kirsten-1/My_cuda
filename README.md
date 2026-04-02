@@ -31,7 +31,8 @@ My_cuda/
     ├── benchmark.cu                # 多版本性能对比
     ├── reduce_v0_global_mem.cu     # v0: 全局内存朴素实现 (baseline)
     ├── reduce_v1_shm.cu            # v1: 共享内存优化
-    └── reduce_v2_warp_divergence.cu # v2: 连续寻址，仍存在 warp divergence
+    ├── reduce_v2_warp_divergence.cu # v2: 连续寻址，仍存在 warp divergence
+    └── reduce_v3_bank_conflict.cu  # v3: 消除 warp divergence
 ```
 
 ## 学习笔记
@@ -47,7 +48,8 @@ My_cuda/
 | v0 | `reduce_v0_global_mem.cu` | 全局内存，交错寻址树形归约 | baseline ✅ |
 | v1 | `reduce_v1_shm.cu` | 共享内存，交错寻址树形归约 | 避免修改原数据，减少 global memory 访问 ✅ |
 | v2 | `reduce_v2_warp_divergence.cu` | 共享内存，连续寻址（仍有 warp divergence） | 改变索引方式，但分支问题未消除 ✅ |
-| v3 | (待续) | 消除 warp divergence | 让同一 warp 内线程走相同分支 |
+| v3 | `reduce_v3_bank_conflict.cu` | 共享内存，步长减半，消除 warp divergence | `if (threadIdx.x < i)` 保证 warp 内线程同进退 ✅ |
+| v4 | (待续) | 消除 bank conflict | 优化共享内存访问模式 |
 
 **v0 实现要点：**
 - 每个 block 处理 `THREAD_PER_BLOCK`(256) 个元素，结果写入 `d_out[blockIdx.x]`
@@ -91,13 +93,20 @@ for (int i = 1; i < blockDim.x; i *= 2) {
 
 **核心问题：** 后期迭代中，Warp 0 内大部分线程空转（masked off），硬件无法同时执行不同路径，必须串行化处理 if/else 分支，导致吞吐量骤降。v3 将通过改变归约策略彻底消除此问题。
 
+**v3 实现要点（消除 warp divergence）：**
+- 改用步长减半策略：`for (int i = blockDim.x/2; i > 0; i /= 2)`
+- 条件判断改为 `if (threadIdx.x < i)`，保证活跃线程从 T0 开始连续分布
+- 关键改进：每轮参与的线程 ID 连续（T0-T127 → T0-T63 → T0-T31 → ...），warp 边界对齐，同一 warp 内线程要么全执行、要么全 idle，**彻底消除 divergence**
+- 性能提升显著：从 ~400 GB/s 跃升至 581 GB/s（+45%）
+
 **Benchmark 结果（RTX 4090 D，N=32M floats，block=256，理论带宽 1008 GB/s）：**
 
-| 版本 | 耗时 (ms) | 带宽 (GB/s) | 效率 |
-|------|-----------|-------------|------|
-| v0 | 0.381 | 353.66 | 35.09% |
-| v1 | 0.321 | 420.10 | 41.68% |
-| v2 | 0.323 | 417.17 | 41.39% |
+| 版本 | 耗时 (ms) | 带宽 (GB/s) | 效率 | 相比 v0 提升 |
+|------|-----------|-------------|------|-------------|
+| v0 | 0.383 | 351.55 | 34.88% | baseline |
+| v1 | 0.337 | 400.08 | 39.69% | +13.8% |
+| v2 | 0.342 | 393.78 | 39.07% | +12.0% |
+| v3 | 0.232 | 581.19 | 57.66% | **+65.3%** |
 
 v1→v2 性能几乎持平，说明连续寻址本身并未消除 warp divergence 的根本开销，v3 将从算法层面彻底解决。
 

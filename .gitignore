@@ -8,4 +8,5 @@ build/
 01_parallel_reduction/reduce_v0
 01_parallel_reduction/reduce_v1
 01_parallel_reduction/reduce_v2
+01_parallel_reduction/reduce_v3
 01_parallel_reduction/benchmark
