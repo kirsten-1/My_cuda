@@ -64,6 +64,33 @@ My_cuda/
 - 改用连续寻址：`index = threadIdx.x * (2*i)`，每轮只有前 `blockDim.x/(2*i)` 个线程参与
 - 相比 v1 的取模判断，活跃线程更集中，但仍跨 warp 边界产生 divergence，性能与 v1 接近
 
+**Warp Divergence 问题分析：**
+
+问题出在条件判断 `if (threadIdx.x < blockDim.x / (2*i))`：
+
+```cuda
+for (int i = 1; i < blockDim.x; i *= 2) {
+    if (threadIdx.x < blockDim.x / (2*i)) {  // ⚠️ divergence 源头
+        int index = threadIdx.x * (2*i);
+        sdata[index] += sdata[index + i];
+    }
+    __syncthreads();
+}
+```
+
+迭代过程（blockDim.x=256）：
+
+| 轮次 | i | 活跃线程范围 | Warp 0 (T0-T31) 状态 | 浪费比例 |
+|------|---|-------------|---------------------|---------|
+| 1-3 | 1,2,4 | T0-127/63/31 | 边界对齐，无 divergence | 0% |
+| 4 | 8 | T0-15 | T0-15 执行，T16-31 idle | 50% |
+| 5 | 16 | T0-7 | T0-7 执行，T8-31 idle | 75% |
+| 6 | 32 | T0-3 | T0-3 执行，T4-31 idle | 87.5% |
+| 7 | 64 | T0-1 | T0-1 执行，T2-31 idle | 93.75% |
+| 8 | 128 | T0 | 仅 T0 执行，T1-31 idle | 96.875% |
+
+**核心问题：** 后期迭代中，Warp 0 内大部分线程空转（masked off），硬件无法同时执行不同路径，必须串行化处理 if/else 分支，导致吞吐量骤降。v3 将通过改变归约策略彻底消除此问题。
+
 **Benchmark 结果（RTX 4090 D，N=32M floats，block=256，理论带宽 1008 GB/s）：**
 
 | 版本 | 耗时 (ms) | 带宽 (GB/s) | 效率 |
