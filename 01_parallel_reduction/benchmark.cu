@@ -19,6 +19,7 @@ extern void launch_v0(float *d_in, float *d_out, int n, int block_num);
 extern void launch_v1(float *d_in, float *d_out, int n, int block_num);
 extern void launch_v2(float *d_in, float *d_out, int n, int block_num);
 extern void launch_v3(float *d_in, float *d_out, int n, int block_num);
+extern void launch_v4(float *d_in, float *d_out, int n, int block_num);
 
 // ============================================================
 // 版本注册表：添加新版本只需在这里加一行
@@ -26,13 +27,15 @@ extern void launch_v3(float *d_in, float *d_out, int n, int block_num);
 struct ReduceVersion {
     const char *name;
     void (*launcher)(float*, float*, int, int);
+    int elements_per_block;  // 每个 block 处理多少个输入元素
 };
 
 static ReduceVersion versions[] = {
-    { "v0", launch_v0 },
-    { "v1", launch_v1 },
-    { "v2", launch_v2 },
-    { "v3", launch_v3 },
+    { "v0", launch_v0, THREAD_PER_BLOCK },
+    { "v1", launch_v1, THREAD_PER_BLOCK },
+    { "v2", launch_v2, THREAD_PER_BLOCK },
+    { "v3", launch_v3, THREAD_PER_BLOCK },
+    { "v4", launch_v4, THREAD_PER_BLOCK * 2 },  // v4 每个 block 处理 2 倍数据
 };
 static const int NUM_VERSIONS = sizeof(versions) / sizeof(versions[0]);
 
@@ -57,9 +60,21 @@ struct BenchmarkResult {
 BenchmarkResult run_benchmark(
     const ReduceVersion &ver,
     float *d_in, float *d_out,
-    float *h_in, float *h_out, float *h_ref,
+    float *h_in, float *h_out,
     int n, int block_num
 ) {
+    // 计算该版本实际输出的 block 数量
+    int actual_blocks = n / ver.elements_per_block;
+
+    // 为该版本生成 CPU 参考结果
+    float *h_ref = (float *)malloc(actual_blocks * sizeof(float));
+    for (int i = 0; i < actual_blocks; i++) {
+        float s = 0;
+        for (int j = 0; j < ver.elements_per_block; j++)
+            s += h_in[i * ver.elements_per_block + j];
+        h_ref[i] = s;
+    }
+
     // 预热（部分版本会原地修改 d_in，每次运行前重新拷贝）
     cudaMemcpy(d_in, h_in, n * sizeof(float), cudaMemcpyHostToDevice);
     ver.launcher(d_in, d_out, n, block_num);
@@ -85,15 +100,18 @@ BenchmarkResult run_benchmark(
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
 
-    cudaMemcpy(h_out, d_out, block_num * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out, d_out, actual_blocks * sizeof(float), cudaMemcpyDeviceToHost);
 
     float  avg_ms   = total_ms / NUM_RUNS;
-    // 读 N 个 float，写 block_num 个 float
-    double bytes    = (double)n * sizeof(float) + (double)block_num * sizeof(float);
+    // 读 N 个 float，写 actual_blocks 个 float
+    double bytes    = (double)n * sizeof(float) + (double)actual_blocks * sizeof(float);
     double bw       = (bytes / 1e9) / (avg_ms / 1e3);
     double eff      = bw / IDEAL_BANDWIDTH * 100.0;
 
-    return { ver.name, avg_ms, bw, eff, check(h_out, h_ref, block_num) };
+    bool correct = check(h_out, h_ref, actual_blocks);
+    free(h_ref);
+
+    return { ver.name, avg_ms, bw, eff, correct };
 }
 
 // ============================================================
@@ -101,34 +119,24 @@ BenchmarkResult run_benchmark(
 // ============================================================
 int main() {
     const int block_num = N / THREAD_PER_BLOCK;
+    const int max_output_size = block_num;  // 最大输出大小（v0-v3）
 
-    float *h_in  = (float *)malloc(N          * sizeof(float));
-    float *h_out = (float *)malloc(block_num  * sizeof(float));
-    float *h_ref = (float *)malloc(block_num  * sizeof(float));
+    float *h_in  = (float *)malloc(N * sizeof(float));
+    float *h_out = (float *)malloc(max_output_size * sizeof(float));
 
     float *d_in, *d_out;
-    cudaMalloc(&d_in,  N         * sizeof(float));
-    cudaMalloc(&d_out, block_num * sizeof(float));
+    cudaMalloc(&d_in,  N * sizeof(float));
+    cudaMalloc(&d_out, max_output_size * sizeof(float));
 
     // 初始化输入
     for (int i = 0; i < N; i++)
         h_in[i] = 2.0f * (float)drand48() - 1.0f;
 
-    // CPU 参考结果
-    for (int i = 0; i < block_num; i++) {
-        float s = 0;
-        for (int j = 0; j < THREAD_PER_BLOCK; j++)
-            s += h_in[i * THREAD_PER_BLOCK + j];
-        h_ref[i] = s;
-    }
-
-    cudaMemcpy(d_in, h_in, N * sizeof(float), cudaMemcpyHostToDevice);
-
     // 运行所有版本
     std::vector<BenchmarkResult> results;
     printf("Running benchmarks (%d runs each)...\n\n", NUM_RUNS);
     for (int i = 0; i < NUM_VERSIONS; i++)
-        results.push_back(run_benchmark(versions[i], d_in, d_out, h_in, h_out, h_ref, N, block_num));
+        results.push_back(run_benchmark(versions[i], d_in, d_out, h_in, h_out, N, block_num));
 
     // 打印结果
     printf("%-8s  %10s  %14s  %14s  %s\n",
@@ -146,6 +154,7 @@ int main() {
 
     cudaFree(d_in);
     cudaFree(d_out);
-    free(h_in); free(h_out); free(h_ref);
+    free(h_in);
+    free(h_out);
     return 0;
 }

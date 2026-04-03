@@ -14,8 +14,11 @@ reduce_v2: reduce_v2_warp_divergence.cu
 reduce_v3: reduce_v3_bank_conflict.cu
 	$(NVCC) $(CFLAGS) -o $@ $<
 
+reduce_v4: reduce_v4_add_during_load.cu
+	$(NVCC) $(CFLAGS) -o $@ $<
+
 # benchmark：链接所有版本的 launcher
-benchmark: benchmark.cu v0_launcher.cu v1_launcher.cu v2_launcher.cu v3_launcher.cu
+benchmark: benchmark.cu v0_launcher.cu v1_launcher.cu v2_launcher.cu v3_launcher.cu v4_launcher.cu
 	$(NVCC) $(CFLAGS) -o $@ $^
 
 # 添加新版本 vN 的步骤：
@@ -27,4 +30,4 @@ benchmark: benchmark.cu v0_launcher.cu v1_launcher.cu v2_launcher.cu v3_launcher
 
 .PHONY: clean
 clean:
-	rm -f reduce_v0 reduce_v1 reduce_v2 reduce_v3 benchmark
+	rm -f reduce_v0 reduce_v1 reduce_v2 reduce_v3 reduce_v4 benchmark
