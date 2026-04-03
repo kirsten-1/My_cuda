@@ -25,6 +25,7 @@
 ```
 My_cuda/
 ├── CMakeLists.txt
+├── README.md
 └── 01_parallel_reduction/          # 并行规约优化
     ├── CMakeLists.txt
     ├── Makefile
@@ -32,7 +33,13 @@ My_cuda/
     ├── reduce_v0_global_mem.cu     # v0: 全局内存朴素实现 (baseline)
     ├── reduce_v1_shm.cu            # v1: 共享内存优化
     ├── reduce_v2_warp_divergence.cu # v2: 连续寻址，仍存在 warp divergence
-    └── reduce_v3_bank_conflict.cu  # v3: 消除 warp divergence
+    ├── reduce_v3_bank_conflict.cu  # v3: 消除 warp divergence
+    ├── reduce_v4_add_during_load.cu # v4: 加载时归约，提升带宽利用率
+    ├── v0_launcher.cu              # v0 单独编译运行入口
+    ├── v1_launcher.cu              # v1 单独编译运行入口
+    ├── v2_launcher.cu              # v2 单独编译运行入口
+    ├── v3_launcher.cu              # v3 单独编译运行入口
+    └── v4_launcher.cu              # v4 单独编译运行入口
 ```
 
 ## 学习笔记
@@ -49,7 +56,7 @@ My_cuda/
 | v1 | `reduce_v1_shm.cu` | 共享内存，交错寻址树形归约 | 避免修改原数据，减少 global memory 访问 ✅ |
 | v2 | `reduce_v2_warp_divergence.cu` | 共享内存，连续寻址（仍有 warp divergence） | 改变索引方式，但分支问题未消除 ✅ |
 | v3 | `reduce_v3_bank_conflict.cu` | 共享内存，步长减半，减少 warp divergence | `if (threadIdx.x < i)` 保证前期无 divergence，仅最后几轮（i<32）Warp 0 内有分支 ✅ |
-| v4 | (待续) | 加载时归约，提升带宽利用率 | 每线程加载 2 个元素并预先求和，减少 block 数量，提高计算密度 |
+| v4 | `reduce_v4_add_during_load.cu` | 加载时归约，提升带宽利用率 | 每线程加载 2 个元素并预先求和，减少 block 数量，提高计算密度 ✅ |
 
 **v0 实现要点：**
 - 每个 block 处理 `THREAD_PER_BLOCK`(256) 个元素，结果写入 `d_out[blockIdx.x]`
@@ -107,28 +114,26 @@ for (int i = 1; i < blockDim.x; i *= 2) {
 - 性能提升显著：从 ~400 GB/s 跃升至 581 GB/s（+45%）
 
 **v3 的瓶颈与 v4 优化方向：**
-- **问题 1：线程利用率低**
-  - 第一轮归约时 i=128，只有前 128 个线程工作，另外 128 个线程仅负责搬运数据后就闲置
-  - 计算资源浪费：一半线程在起始阶段就在"围观"
-- **问题 2：指令开销占比高**
-  - 每个 block 处理的数据量少（仅 256 个元素），block 启动、同步、写回的固定开销占比大
-  - 内存带宽利用率不足：每个线程只加载 1 个数据，未充分利用内存带宽
-- **v4 优化策略：加载时归约（Load-Time Reduction）**
-  - 减少 block 数量至原来的一半：`Grid(N / (2*THREAD_PER_BLOCK))`
-  - 每个线程加载 2 个元素并预先求和：`sdata[tid] = input[tid] + input[tid + blockDim.x]`
-  - 效果：Shared Memory 初始化完成时已完成第一轮归约，后续循环从 i=blockDim.x/2 开始，所有线程立即投入工作
-  - 预期收益：提高计算密度，减少管理开销，进一步提升带宽利用率
+- **问题 1：线程利用率低** — 第一轮归约 i=128，只有前 128 个线程工作，另外 128 个线程仅搬运数据后闲置
+- **问题 2：指令开销占比高** — 每个 block 仅处理 256 个元素，block 启动、同步、写回的固定开销占比大，内存带宽利用不充分
+
+**v4 实现要点（加载时归约）：**
+- Grid 大小减半：`Grid(N / (2*THREAD_PER_BLOCK))`，每个 block 处理 512 个元素
+- 每个线程加载 2 个元素并预先求和：`sdata[tid] = input[tid] + input[tid + blockDim.x]`
+- 效果：Shared Memory 初始化完成时已完成第一轮归约，所有 256 个线程从一开始就参与计算
+- 充分利用内存带宽，减少 block 管理开销，带宽效率达到 **88.49%**
 
 **Benchmark 结果（RTX 4090 D，N=32M floats，block=256，理论带宽 1008 GB/s）：**
 
 | 版本 | 耗时 (ms) | 带宽 (GB/s) | 效率 | 相比 v0 提升 |
 |------|-----------|-------------|------|-------------|
-| v0 | 0.383 | 351.55 | 34.88% | baseline |
-| v1 | 0.337 | 400.08 | 39.69% | +13.8% |
-| v2 | 0.342 | 393.78 | 39.07% | +12.0% |
-| v3 | 0.232 | 581.19 | 57.66% | **+65.3%** |
+| v0 | 0.386 | 349.21 | 34.64% | baseline |
+| v1 | 0.340 | 396.30 | 39.32% | +13.5% |
+| v2 | 0.348 | 387.33 | 38.43% | +10.9% |
+| v3 | 0.241 | 558.62 | 55.42% | **+60.0%** |
+| v4 | 0.151 | 891.96 | 88.49% | **+155.4%** |
 
-v1→v2 性能几乎持平，说明连续寻址本身并未消除 warp divergence 的根本开销，v3 将从算法层面彻底解决。
+v1→v2 性能几乎持平，说明连续寻址本身并未消除 warp divergence 的根本开销。v3 从算法层面大幅减少 divergence，v4 通过加载时归约进一步将带宽效率推至接近理论峰值。
 
 **编译与运行：**
 
