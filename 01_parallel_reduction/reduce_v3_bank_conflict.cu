@@ -6,7 +6,7 @@
 
 #define THREAD_PER_BLOCK 256
 
-// --- GPU 核函数：并行归约（shared memory 版，解决 warp divergence，无 bank conflict）---
+// --- GPU 核函数：并行归约（shared memory 版，减少 warp divergence）---
 // 每个 block 负责对自己分到的 blockDim.x 个元素求和，结果写入 d_out[blockIdx.x]
 __global__ void reduce(float *d_in, float *d_out) {
     // 让每个 block 的指针直接指向属于自己的那段输入数据
@@ -23,8 +23,9 @@ __global__ void reduce(float *d_in, float *d_out) {
     //   i=1: [0]+=[1]                                 (前 1 个线程参与)
     for (int i = blockDim.x / 2; i > 0; i /= 2) {
         // 只有前 i 个线程参与本轮计算
-        // 相比 v2，这里使用 threadIdx.x < i 判断，保证同一个 warp 内的线程要么全部参与，要么全部不参与
-        // 避免了 warp divergence，提升了性能
+        // 相比 v2，这里使用 threadIdx.x < i 判断，活跃线程从 T0 开始连续分布
+        // 当 i >= 32 时，warp 边界对齐，无 divergence；当 i < 32 时，仅 Warp 0 内部有 divergence
+        // 相比 v2 从 i=8 开始多个 warp 受影响，v3 仅最后 5 轮、仅 Warp 0 受影响，大幅减少浪费
         if (threadIdx.x < i) {
             sdata[threadIdx.x] += sdata[threadIdx.x + i];
         }
