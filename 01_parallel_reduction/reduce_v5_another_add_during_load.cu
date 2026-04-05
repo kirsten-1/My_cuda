@@ -4,7 +4,7 @@
 #include <cuda_runtime.h>
 #include <cmath>
 
-#define THREAD_PER_BLOCK 256
+#define THREAD_PER_BLOCK 128
 
 // --- GPU 核函数：并行归约（shared memory 版，减少 warp divergence）---
 // 每个 block 负责对自己分到的 blockDim.x 个元素求和，结果写入 d_out[blockIdx.x]
@@ -12,8 +12,9 @@ __global__ void reduce(float *d_in, float *d_out) {
     // 让每个 block 的指针直接指向属于自己的那段输入数据
     // block i 处理 d_in[i*blockDim.x ... (i+1)*blockDim.x - 1]
     __shared__ float sdata[THREAD_PER_BLOCK]; // 每个 block 内的共享内存，用于存储当前 block 的数据
-    float *input_dim = d_in + blockIdx.x * blockDim.x;
-    sdata[threadIdx.x] = input_dim[threadIdx.x]; // 将全局内存的数据加载到共享内存中
+    float *input_dim = d_in + blockIdx.x * blockDim.x * 2; // 每个 block 处理 blockDim.x*2 个元素，且重叠，所以每个 block 的起始位置是 blockIdx.x * blockDim.x * 2
+    // 每个线程加载两个元素并求和，减少后续归约的轮数
+    sdata[threadIdx.x] = input_dim[threadIdx.x] + input_dim[threadIdx.x + blockDim.x]; // 将全局内存的数据加载到共享内存中
     __syncthreads(); // 确保所有线程都加载完成后再进行归约
     // 树形归约：每轮步长 i 减半（blockDim.x/2, blockDim.x/4, ..., 1）
     // 第 k 轮结束后，只有前 blockDim.x / 2^k 个线程的数据被更新
@@ -52,7 +53,7 @@ bool check(float *out, float *res, int n) {
 int main() {
     // 1. 定义数据规模
     const int N = 32 * 1024 * 1024;
-    int block_num = N / THREAD_PER_BLOCK;
+    int block_num = N / THREAD_PER_BLOCK / 2; // 每个 block 处理 THREAD_PER_BLOCK 个元素，且每个元素被两个 block 处理（重叠），所以 block 数是 N/(THREAD_PER_BLOCK*2)
 
     // 2. 分配 Host 内存
     float *input = (float *)malloc(N * sizeof(float));
@@ -72,8 +73,8 @@ int main() {
     // 5. CPU 计算结果（用于对照验证）
     for (int i = 0; i < block_num; i++) {
         float cur = 0;
-        for (int j = 0; j < THREAD_PER_BLOCK; j++) {
-            cur += input[i * THREAD_PER_BLOCK + j];
+        for (int j = 0; j < THREAD_PER_BLOCK * 2; j++) { // 注意这里每个 block 处理 THREAD_PER_BLOCK*2 个元素，且重叠，所以 j 的范围是 0 到 THREAD_PER_BLOCK*2-1
+            cur += input[i * THREAD_PER_BLOCK * 2 + j]; // 例如 block 0 处理 input[0...255]，block 1 处理 input[128...383]，以此类推，每个元素被两个 block 处理一次（重叠），所以 j 的范围是 0 到 THREAD_PER_BLOCK*2-1
         }
         result[i] = cur;
     }

@@ -8,7 +8,7 @@
 #undef main
 
 void launch_v5(float *d_in, float *d_out, int n, int block_num) {
-    dim3 grid(block_num, 1);
-    dim3 block(256, 1);
+    dim3 grid(n / 128 / 2, 1);
+    dim3 block(128, 1);
     reduce_v5<<<grid, block>>>(d_in, d_out);
 }

@@ -37,7 +37,7 @@ static ReduceVersion versions[] = {
     { "v2", launch_v2, THREAD_PER_BLOCK },
     { "v3", launch_v3, THREAD_PER_BLOCK },
     { "v4", launch_v4, THREAD_PER_BLOCK * 2 },  // v4 每个 block 处理 2 倍数据
-    { "v5", launch_v5, THREAD_PER_BLOCK },        // v5 每个 block 处理 blockDim.x 个数据
+    { "v5", launch_v5, 128 * 2 },                  // v5: 128 threads, 每个 block 处理 256 个元素
 };
 static const int NUM_VERSIONS = sizeof(versions) / sizeof(versions[0]);
 
