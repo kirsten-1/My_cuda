@@ -36,12 +36,14 @@ My_cuda/
     ├── reduce_v3_bank_conflict.cu  # v3: 消除 warp divergence
     ├── reduce_v4_add_during_load.cu          # v4: 加载时归约（减 block 数）
     ├── reduce_v5_another_add_during_load.cu  # v5: 加载时归约（减线程数）
+    ├── reduce_v6_unrolling_the_last_warp.cu # v6: Warp 展开优化
     ├── v0_launcher.cu              # v0 单独编译运行入口
     ├── v1_launcher.cu              # v1 单独编译运行入口
     ├── v2_launcher.cu              # v2 单独编译运行入口
     ├── v3_launcher.cu              # v3 单独编译运行入口
     ├── v4_launcher.cu              # v4 单独编译运行入口
-    └── v5_launcher.cu              # v5 单独编译运行入口
+    ├── v5_launcher.cu              # v5 单独编译运行入口
+    └── v6_launcher.cu              # v6 单独编译运行入口
 ```
 
 ## 学习笔记
@@ -60,6 +62,7 @@ My_cuda/
 | v3 | `reduce_v3_bank_conflict.cu` | 共享内存，步长减半，减少 warp divergence | `if (threadIdx.x < i)` 保证前期无 divergence，仅最后几轮（i<32）Warp 0 内有分支 ✅ |
 | v4 | `reduce_v4_add_during_load.cu` | 加载时归约，减少 block 数量 | 每线程加载 2 个元素并预先求和，block 数减半，提高计算密度 ✅ |
 | v5 | `reduce_v5_another_add_during_load.cu` | 加载时归约，减少线程数 | 每 block 线程数减半（128），每线程处理 2 个元素，block 数不变 ✅ |
+| v6 | `reduce_v6_unrolling_the_last_warp.cu` | Warp 展开优化 | 最后一个 Warp 内手动展开归约，去除 `__syncthreads()` 和分支判断 ✅ |
 
 **v0 实现要点：**
 - 每个 block 处理 `THREAD_PER_BLOCK`(256) 个元素，结果写入 `d_out[blockIdx.x]`
@@ -152,18 +155,29 @@ for (int i = 1; i < blockDim.x; i *= 2) {
 3. **归约轮数相同但参与线程更少** — 两者都需要 log2 轮归约，但 v5 每轮参与的线程更少，计算密度略低
 4. **差距极小的原因** — RTX 4090 的 SM 数量（128）和调度能力足够强，v5 虽然每 block 只有 4 个 warp，但 block 数量翻倍弥补了 occupancy，两种策略在该架构上几乎等效
 
+**v6 实现要点（Warp 展开优化 — Unrolling the Last Warp）：**
+- **核心观察：** 随着归约层层递进，活跃线程数不断减少。当步长 s ≤ 32 时，所有活跃线程都属于同一个 Warp（线程束）
+- **Warp 的同步特性（SIMD synchronous）：** 同一 Warp 内的线程隐式同步执行，步调完全一致（如线程 0 执行加法时，线程 31 也在执行同一条指令）
+- **优化点：**
+  1. **不再需要 `__syncthreads()`** — Warp 内部天生同步，不需要昂贵的块级别屏障指令来强制等待
+  2. **不再需要 `if (tid < s)` 判断** — 同一 Warp 内即使加了 if 判断，硬件依然会串行处理分支（Warp Divergence），并不能节省时间，索性去掉判断让所有线程都运行
+- **具体操作：** 手动展开循环的最后 6 次迭代（对应步长 32, 16, 8, 4, 2, 1），使用 `volatile` 修饰 shared memory 指针确保编译器不会优化掉中间读写
+- **归约循环变为** `for (i = blockDim.x/2; i > 32; i /= 2)`，当 i ≤ 32 时调用 `warpReduce()` 函数完成最后 6 步
+- 保留 v4 的 add-during-load 优化（256 线程，每 block 处理 512 个元素）
+
 **Benchmark 结果（RTX 4090 D，N=32M floats，block=256，理论带宽 1008 GB/s）：**
 
 | 版本 | 耗时 (ms) | 带宽 (GB/s) | 效率 | 相比 v0 提升 |
 |------|-----------|-------------|------|-------------|
-| v0 | 0.385 | 349.78 | 34.70% | baseline |
-| v1 | 0.340 | 395.85 | 39.27% | +13.2% |
-| v2 | 0.348 | 387.19 | 38.41% | +10.7% |
-| v3 | 0.235 | 573.03 | 56.85% | **+63.8%** |
-| v4 | 0.150 | 895.45 | 88.83% | **+156.0%** |
-| v5 | 0.152 | 887.93 | 88.09% | **+153.8%** |
+| v0 | 0.381 | 353.22 | 35.04% | baseline |
+| v1 | 0.324 | 416.37 | 41.31% | +17.9% |
+| v2 | 0.329 | 409.36 | 40.61% | +15.9% |
+| v3 | 0.220 | 613.03 | 60.82% | **+73.6%** |
+| v4 | 0.151 | 890.75 | 88.37% | **+152.2%** |
+| v5 | 0.149 | 905.31 | 89.81% | **+156.3%** |
+| v6 | 0.148 | 908.15 | 90.09% | **+157.1%** |
 
-v1→v2 性能几乎持平，说明连续寻址本身并未消除 warp divergence 的根本开销。v3 从算法层面大幅减少 divergence，v4/v5 通过加载时归约将带宽效率推至接近理论峰值（~89%）。v4（减 block 数）和 v5（减线程数）在 RTX 4090 上性能几乎一致，说明该架构的 warp 调度器和 SM 并行度足以消化两种策略的差异。
+v1→v2 性能几乎持平，说明连续寻址本身并未消除 warp divergence 的根本开销。v3 从算法层面大幅减少 divergence，v4/v5 通过加载时归约将带宽效率推至接近理论峰值（~89%）。v6 在 v4 基础上展开最后一个 Warp 的归约循环，消除了 5 次 `__syncthreads()` 和分支判断，带宽效率进一步提升至 **90.09%**。
 
 **编译与运行：**
 
