@@ -20,6 +20,7 @@ extern void launch_v1(float *d_in, float *d_out, int n, int block_num);
 extern void launch_v2(float *d_in, float *d_out, int n, int block_num);
 extern void launch_v3(float *d_in, float *d_out, int n, int block_num);
 extern void launch_v4(float *d_in, float *d_out, int n, int block_num);
+extern void launch_v5(float *d_in, float *d_out, int n, int block_num);
 
 // ============================================================
 // 版本注册表：添加新版本只需在这里加一行
@@ -36,6 +37,7 @@ static ReduceVersion versions[] = {
     { "v2", launch_v2, THREAD_PER_BLOCK },
     { "v3", launch_v3, THREAD_PER_BLOCK },
     { "v4", launch_v4, THREAD_PER_BLOCK * 2 },  // v4 每个 block 处理 2 倍数据
+    { "v5", launch_v5, THREAD_PER_BLOCK },        // v5 每个 block 处理 blockDim.x 个数据
 };
 static const int NUM_VERSIONS = sizeof(versions) / sizeof(versions[0]);
 
