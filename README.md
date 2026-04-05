@@ -37,13 +37,15 @@ My_cuda/
     ├── reduce_v4_add_during_load.cu          # v4: 加载时归约（减 block 数）
     ├── reduce_v5_another_add_during_load.cu  # v5: 加载时归约（减线程数）
     ├── reduce_v6_unrolling_the_last_warp.cu # v6: Warp 展开优化
+    ├── reduce_v7_complete_unrolling_and_templates.cu # v7: 完全展开 + 模板
     ├── v0_launcher.cu              # v0 单独编译运行入口
     ├── v1_launcher.cu              # v1 单独编译运行入口
     ├── v2_launcher.cu              # v2 单独编译运行入口
     ├── v3_launcher.cu              # v3 单独编译运行入口
     ├── v4_launcher.cu              # v4 单独编译运行入口
     ├── v5_launcher.cu              # v5 单独编译运行入口
-    └── v6_launcher.cu              # v6 单独编译运行入口
+    ├── v6_launcher.cu              # v6 单独编译运行入口
+    └── v7_launcher.cu              # v7 单独编译运行入口
 ```
 
 ## 学习笔记
@@ -63,6 +65,7 @@ My_cuda/
 | v4 | `reduce_v4_add_during_load.cu` | 加载时归约，减少 block 数量 | 每线程加载 2 个元素并预先求和，block 数减半，提高计算密度 ✅ |
 | v5 | `reduce_v5_another_add_during_load.cu` | 加载时归约，减少线程数 | 每 block 线程数减半（128），每线程处理 2 个元素，block 数不变 ✅ |
 | v6 | `reduce_v6_unrolling_the_last_warp.cu` | Warp 展开优化 | 最后一个 Warp 内手动展开归约，去除 `__syncthreads()` 和分支判断 ✅ |
+| v7 | `reduce_v7_complete_unrolling_and_templates.cu` | 完全展开 + 模板 | 模板参数替代 `blockDim.x`，所有归约轮次编译期展开，消除循环开销 ✅ |
 
 **v0 实现要点：**
 - 每个 block 处理 `THREAD_PER_BLOCK`(256) 个元素，结果写入 `d_out[blockIdx.x]`
@@ -165,19 +168,31 @@ for (int i = 1; i < blockDim.x; i *= 2) {
 - **归约循环变为** `for (i = blockDim.x/2; i > 32; i /= 2)`，当 i ≤ 32 时调用 `warpReduce()` 函数完成最后 6 步
 - 保留 v4 的 add-during-load 优化（256 线程，每 block 处理 512 个元素）
 
+**v7 实现要点（完全展开 + 模板参数 — Complete Unrolling with Templates）：**
+- **核心思想：** v6 只展开了最后一个 Warp（步长 ≤ 32），v7 更进一步，将整个归约循环完全展开，彻底消除循环控制开销
+- **模板参数替代 `blockDim.x`：** 使用 `template <unsigned int blockSize>` 将 block 大小作为编译期常量，所有条件判断（`if (blockSize >= 512)` 等）在编译时求值，不满足的分支被编译器直接删除，不会生成任何机器码
+- **完全展开的归约过程（以 blockSize=256 为例）：**
+  - `blockSize >= 512` → 编译期判定为 false，整个 if 块被删除
+  - `blockSize >= 256` → true，执行 `sdata[tid] += sdata[tid + 128]`，后接 `__syncthreads()`
+  - `blockSize >= 128` → true，执行 `sdata[tid] += sdata[tid + 64]`，后接 `__syncthreads()`
+  - 步长 ≤ 32 后调用 `warpReduce()` 完成最后 6 步（与 v6 相同）
+- **优势：** 消除了 `for` 循环的迭代变量更新、条件判断和跳转指令，生成的 PTX/SASS 代码为纯线性序列
+- **灵活性：** 同一份代码可通过不同模板实例化（`reduce<128>`、`reduce<256>`、`reduce<512>`）适配不同 block 大小，无需手动修改
+
 **Benchmark 结果（RTX 4090 D，N=32M floats，block=256，理论带宽 1008 GB/s）：**
 
 | 版本 | 耗时 (ms) | 带宽 (GB/s) | 效率 | 相比 v0 提升 |
 |------|-----------|-------------|------|-------------|
-| v0 | 0.381 | 353.22 | 35.04% | baseline |
-| v1 | 0.324 | 416.37 | 41.31% | +17.9% |
-| v2 | 0.329 | 409.36 | 40.61% | +15.9% |
-| v3 | 0.220 | 613.03 | 60.82% | **+73.6%** |
-| v4 | 0.151 | 890.75 | 88.37% | **+152.2%** |
-| v5 | 0.149 | 905.31 | 89.81% | **+156.3%** |
-| v6 | 0.148 | 908.15 | 90.09% | **+157.1%** |
+| v0 | 0.385 | 350.16 | 34.74% | baseline |
+| v1 | 0.340 | 396.74 | 39.36% | +13.3% |
+| v2 | 0.346 | 389.01 | 38.59% | +11.1% |
+| v3 | 0.233 | 577.18 | 57.26% | **+64.8%** |
+| v4 | 0.149 | 899.56 | 89.24% | **+156.9%** |
+| v5 | 0.151 | 891.14 | 88.41% | **+154.5%** |
+| v6 | 0.151 | 891.11 | 88.40% | **+154.5%** |
+| v7 | 0.150 | 893.58 | 88.65% | **+155.2%** |
 
-v1→v2 性能几乎持平，说明连续寻址本身并未消除 warp divergence 的根本开销。v3 从算法层面大幅减少 divergence，v4/v5 通过加载时归约将带宽效率推至接近理论峰值（~89%）。v6 在 v4 基础上展开最后一个 Warp 的归约循环，消除了 5 次 `__syncthreads()` 和分支判断，带宽效率进一步提升至 **90.09%**。
+v1→v2 性能几乎持平，说明连续寻址本身并未消除 warp divergence 的根本开销。v3 从算法层面大幅减少 divergence，v4/v5 通过加载时归约将带宽效率推至接近理论峰值（~89%）。v6 在 v4 基础上展开最后一个 Warp 的归约循环，消除了 5 次 `__syncthreads()` 和分支判断。v7 进一步将整个归约循环通过模板完全展开，消除所有循环控制开销，生成纯线性机器码。v4-v7 在 RTX 4090 上性能非常接近（~89%），说明在该规模下内存带宽已成为主要瓶颈，计算侧的优化收益趋于饱和。
 
 **编译与运行：**
 
