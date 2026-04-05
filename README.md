@@ -38,6 +38,7 @@ My_cuda/
     ├── reduce_v5_another_add_during_load.cu  # v5: 加载时归约（减线程数）
     ├── reduce_v6_unrolling_the_last_warp.cu # v6: Warp 展开优化
     ├── reduce_v7_complete_unrolling_and_templates.cu # v7: 完全展开 + 模板
+    ├── reduce_v7_v2_pragma_unroll.cu # v7b: #pragma unroll + 模板
     ├── v0_launcher.cu              # v0 单独编译运行入口
     ├── v1_launcher.cu              # v1 单独编译运行入口
     ├── v2_launcher.cu              # v2 单独编译运行入口
@@ -46,6 +47,7 @@ My_cuda/
     ├── v5_launcher.cu              # v5 单独编译运行入口
     ├── v6_launcher.cu              # v6 单独编译运行入口
     └── v7_launcher.cu              # v7 单独编译运行入口
+    └── v7b_launcher.cu             # v7b 单独编译运行入口
 ```
 
 ## 学习笔记
@@ -66,6 +68,7 @@ My_cuda/
 | v5 | `reduce_v5_another_add_during_load.cu` | 加载时归约，减少线程数 | 每 block 线程数减半（128），每线程处理 2 个元素，block 数不变 ✅ |
 | v6 | `reduce_v6_unrolling_the_last_warp.cu` | Warp 展开优化 | 最后一个 Warp 内手动展开归约，去除 `__syncthreads()` 和分支判断 ✅ |
 | v7 | `reduce_v7_complete_unrolling_and_templates.cu` | 完全展开 + 模板 | 模板参数替代 `blockDim.x`，所有归约轮次编译期展开，消除循环开销 ✅ |
+| v7b | `reduce_v7_v2_pragma_unroll.cu` | `#pragma unroll` + 模板 | 用 `for` 循环 + `#pragma unroll` 替代手动 if 链，代码更简洁，效果等价 ✅ |
 
 **v0 实现要点：**
 - 每个 block 处理 `THREAD_PER_BLOCK`(256) 个元素，结果写入 `d_out[blockIdx.x]`
@@ -179,6 +182,19 @@ for (int i = 1; i < blockDim.x; i *= 2) {
 - **优势：** 消除了 `for` 循环的迭代变量更新、条件判断和跳转指令，生成的 PTX/SASS 代码为纯线性序列
 - **灵活性：** 同一份代码可通过不同模板实例化（`reduce<128>`、`reduce<256>`、`reduce<512>`）适配不同 block 大小，无需手动修改
 
+**v7b 实现要点（`#pragma unroll` + 模板 — 编译器辅助完全展开）：**
+- **与 v7 的区别：** v7 手动写 `if (blockSize >= N)` 链逐一列出每轮归约，v7b 用 `for` 循环 + `#pragma unroll` 让编译器自动展开
+- **代码形式：**
+  ```cuda
+  #pragma unroll
+  for (unsigned int i = blockSize / 2; i > 32; i /= 2) {
+      if (tid < i) { sdata[tid] += sdata[tid + i]; }
+      __syncthreads();
+  }
+  ```
+- `blockSize` 是模板编译期常量，`#pragma unroll` 指示编译器将循环完全展开，生成的机器码与 v7 等价
+- **优势：** 代码更简洁，无需为每种 block 大小手动写 if 分支，可维护性更好；添加新的 block 大小支持无需修改归约逻辑
+
 **Benchmark 结果（RTX 4090 D，N=32M floats，block=256，理论带宽 1008 GB/s）：**
 
 | 版本 | 耗时 (ms) | 带宽 (GB/s) | 效率 | 相比 v0 提升 |
@@ -191,8 +207,9 @@ for (int i = 1; i < blockDim.x; i *= 2) {
 | v5 | 0.151 | 891.14 | 88.41% | **+154.5%** |
 | v6 | 0.151 | 891.11 | 88.40% | **+154.5%** |
 | v7 | 0.150 | 893.58 | 88.65% | **+155.2%** |
+| v7b | 0.150 | 894.03 | 88.69% | **+155.3%** |
 
-v1→v2 性能几乎持平，说明连续寻址本身并未消除 warp divergence 的根本开销。v3 从算法层面大幅减少 divergence，v4/v5 通过加载时归约将带宽效率推至接近理论峰值（~89%）。v6 在 v4 基础上展开最后一个 Warp 的归约循环，消除了 5 次 `__syncthreads()` 和分支判断。v7 进一步将整个归约循环通过模板完全展开，消除所有循环控制开销，生成纯线性机器码。v4-v7 在 RTX 4090 上性能非常接近（~89%），说明在该规模下内存带宽已成为主要瓶颈，计算侧的优化收益趋于饱和。
+v1→v2 性能几乎持平，说明连续寻址本身并未消除 warp divergence 的根本开销。v3 从算法层面大幅减少 divergence，v4/v5 通过加载时归约将带宽效率推至接近理论峰值（~89%）。v6 在 v4 基础上展开最后一个 Warp 的归约循环，消除了 5 次 `__syncthreads()` 和分支判断。v7 进一步将整个归约循环通过模板完全展开，消除所有循环控制开销，生成纯线性机器码。v7b 用 `#pragma unroll` + `for` 循环替代 v7 的手动 if 链，生成等价机器码，性能一致。v4-v7b 在 RTX 4090 上性能非常接近（~89%），说明在该规模下内存带宽已成为主要瓶颈，计算侧的优化收益趋于饱和。
 
 **编译与运行：**
 
