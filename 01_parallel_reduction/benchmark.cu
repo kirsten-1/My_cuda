@@ -28,6 +28,7 @@ extern void launch_v7b(float *d_in, float *d_out, int n, int block_num);
 extern void launch_v8(float *d_in, float *d_out, int n, int block_num);
 extern void launch_v9(float *d_in, float *d_out, int n, int block_num);
 extern void launch_v10(float *d_in, float *d_out, int n, int block_num);
+extern void launch_v11(float *d_in, float *d_out, int n, int block_num);
 
 // ============================================================
 // L2 缓存刷新 kernel
@@ -62,6 +63,7 @@ static ReduceVersion versions[] = {
     { "v8",  launch_v8,  0,                    2048 },
     { "v9",  launch_v9,  0,                    1824 },  // v9: occupancy API auto gridSize
     { "v10", launch_v10, 0,                    1824 },  // v10: occupancy API auto blockSize + gridSize
+    { "v11", launch_v11, 0,                    2048 },  // v11: warp shuffle replace shared memory warp reduce
 };
 static const int NUM_VERSIONS = sizeof(versions) / sizeof(versions[0]);
 
