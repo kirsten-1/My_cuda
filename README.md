@@ -42,6 +42,7 @@ My_cuda/
     ├── reduce_v8_grid_stride_loop.cu # v8: Grid-stride loop
     ├── reduce_v9_occupancy_grid.cu  # v9: Occupancy API 自动 gridSize
     ├── reduce_v10_occupancy_full.cu # v10: Occupancy API 自动 blockSize + gridSize
+    ├── reduce_v11_shuffle.cu        # v11: Warp Shuffle 替代 Shared Memory warp 归约
     ├── test_v8.cu                   # v8 专项测试（数据规模扫描/L2冷热对比/grid size扫描）
     ├── v0_launcher.cu ~ v8_launcher.cu  # 各版本 benchmark launcher
 ```
@@ -68,6 +69,7 @@ My_cuda/
 | v8 | `reduce_v8_grid_stride_loop.cu` | Grid-stride loop | block 数量与数据规模解耦，每个线程通过 while 循环处理多段数据 ✅ |
 | v9 | `reduce_v9_occupancy_grid.cu` | Occupancy API 自动 gridSize | blockSize 固定 256，gridSize 由 Occupancy API 自动计算 ✅ |
 | v10 | `reduce_v10_occupancy_full.cu` | Occupancy API 自动 blockSize + gridSize | 遍历候选 blockSize，选择 occupancy 最高的配置 ✅ |
+| v11 | `reduce_v11_shuffle.cu` | Warp Shuffle 替代 Shared Memory warp 归约 | 用 `__shfl_down_sync` 替代 volatile Shared Memory 的 warp 归约，纯寄存器操作 ✅ |
 
 **v0 实现要点：**
 - 每个 block 处理 `THREAD_PER_BLOCK`(256) 个元素，结果写入 `d_out[blockIdx.x]`
@@ -245,6 +247,57 @@ for (int i = 1; i < blockDim.x; i *= 2) {
   - 但实测 **blockSize=256 性能最优**（925 GB/s），blockSize=64 只有 921 GB/s
   - 原因：更大的 blockSize 意味着更少的 block 管理开销，且 shared memory 归约阶段的线程利用率更高
   - 教训：Occupancy 是性能的必要条件但非充分条件，实际性能还受内存访问模式、指令级并行度等因素影响
+
+**v11 实现要点（Warp Shuffle 替代 Shared Memory warp 归约）：**
+- **核心思想：** v6-v10 的 warp 归约都使用 `volatile` Shared Memory 逐步加法，v11 用 `__shfl_down_sync` Shuffle 指令替代，将 warp 内归约从 Shared Memory 搬到纯寄存器操作（详见 [007 Shuffle 指令详解](notes/01_api/007_shuffle_instructions.md)）
+- **改造范围：** 仅替换 warp 内归约（最后 32→1 的部分），Block 级归约（256→128→64）仍用 Shared Memory + `__syncthreads()`
+- **旧写法（Shared Memory + volatile）：**
+  ```cuda
+  __device__ void warpReduce(volatile float* sdata, int tid) {
+      sdata[tid] += sdata[tid + 32];  // 每步读写 Shared Memory，延迟 ~20-30 cycles
+      sdata[tid] += sdata[tid + 16];
+      // ...
+  }
+  ```
+- **新写法（Shuffle，纯寄存器操作）：**
+  ```cuda
+  __device__ float warpReduceShuffle(float val) {
+      val += __shfl_down_sync(0xffffffff, val, 16);  // 寄存器直传，延迟 ~1 cycle
+      val += __shfl_down_sync(0xffffffff, val, 8);
+      val += __shfl_down_sync(0xffffffff, val, 4);
+      val += __shfl_down_sync(0xffffffff, val, 2);
+      val += __shfl_down_sync(0xffffffff, val, 1);
+      return val;
+  }
+  ```
+- **调用时注意 stride=32 的合并：** Block 级归约最后一步只做到 `tid < 64`（stride=64），剩余 64 个值在 `sdata[0..63]` 中。进入 warp 归约时需先将 `sdata[tid]` 与 `sdata[tid + 32]` 合并，再交给 Shuffle 从 offset=16 开始：
+  ```cuda
+  if (tid < 32) {
+      float val = sdata[tid] + sdata[tid + 32];  // stride=32，合并到寄存器
+      val = warpReduceShuffle(val);               // stride 16→1，纯寄存器
+      if (tid == 0) d_out[blockIdx.x] = val;
+  }
+  ```
+- **Shuffle 相比 Shared Memory 的三大优势：**
+  1. **延迟更低：** 寄存器间直传 ~1 cycle vs Shared Memory ~20-30 cycles
+  2. **无需 `volatile`：** 数据不经过内存，不存在编译器缓存导致的可见性问题
+  3. **无需额外 `__syncwarp()`：** `_sync` 后缀内建同步，同步与数据交换原子绑定
+- **局限：** Shuffle 只能在同一 Warp（32 线程）内使用，跨 Warp 的数据交换仍需 Shared Memory
+
+**v11 Grid Size 扫描结果（RTX 4090 D，N=32M，block=256，20 runs）：**
+
+| Grid Size | 耗时 (ms) | 带宽 (GB/s) | 校验 |
+|-----------|-----------|-------------|------|
+| 128 | 0.186 | 722.18 | PASS |
+| 256 | 0.151 | 890.75 | PASS |
+| 512 | 0.149 | 901.58 | PASS |
+| 1024 | 0.153 | 877.64 | PASS |
+| 2048 | 0.148 | 906.21 | PASS |
+| 4096 | 0.148 | 909.41 | PASS |
+| 8192 | 0.148 | 905.77 | PASS |
+| 16384 | 0.148 | 905.96 | PASS |
+
+512 以上基本饱和（~901-909 GB/s），与 v8 的 Shared Memory 方案性能持平。在已被内存带宽瓶颈限制的 reduce 场景中，Shuffle 的主要收益不在吞吐量提升，而在于**代码安全性**（消除 volatile 隐患）和**架构兼容性**（Volta+ 不再依赖 warp 隐式同步）。
 
 **v8 性能验证 — 对 ~100% 效率的怀疑与求证：**
 
