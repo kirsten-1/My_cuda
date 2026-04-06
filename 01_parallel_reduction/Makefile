@@ -18,7 +18,7 @@ reduce_v4: reduce_v4_add_during_load.cu
 	$(NVCC) $(CFLAGS) -o $@ $<
 
 # benchmark：链接所有版本的 launcher
-benchmark: benchmark.cu v0_launcher.cu v1_launcher.cu v2_launcher.cu v3_launcher.cu v4_launcher.cu v5_launcher.cu v6_launcher.cu v7_launcher.cu v7b_launcher.cu v8_launcher.cu v9_launcher.cu v10_launcher.cu v11_launcher.cu
+benchmark: benchmark.cu v0_launcher.cu v1_launcher.cu v2_launcher.cu v3_launcher.cu v4_launcher.cu v5_launcher.cu v6_launcher.cu v7_launcher.cu v7b_launcher.cu v8_launcher.cu v9_launcher.cu v10_launcher.cu v11_launcher.cu v12_launcher.cu
 	$(NVCC) $(CFLAGS) -o $@ $^
 
 # 添加新版本 vN 的步骤：
